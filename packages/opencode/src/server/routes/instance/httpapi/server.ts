@@ -56,6 +56,7 @@ import { V2Api, v2Handlers } from "./v2"
 import { WorkspaceApi, workspaceHandlers } from "./workspace"
 import { disposeMiddleware } from "./lifecycle"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
+import * as ServerBackend from "@/server/backend"
 
 const Query = Schema.Struct({
   directory: Schema.optional(Schema.String),
@@ -78,13 +79,21 @@ function decode(input: string) {
   }
 }
 
+function currentDirectory() {
+  try {
+    return Instance.directory
+  } catch {
+    return process.cwd()
+  }
+}
+
 const instance = HttpRouter.middleware()(
   Effect.gen(function* () {
     return (effect) =>
       Effect.gen(function* () {
         const query = yield* HttpServerRequest.schemaSearchParams(Query)
         const headers = yield* HttpServerRequest.schemaHeaders(Headers)
-        const raw = query.directory || headers["x-opencode-directory"] || process.cwd()
+        const raw = query.directory || headers["x-opencode-directory"] || currentDirectory()
         const workspace = query.workspace || undefined
         const ctx = yield* Effect.promise(() =>
           Instance.provide({
@@ -98,6 +107,18 @@ const instance = HttpRouter.middleware()(
         return yield* next.pipe(Effect.provideService(InstanceRef, ctx))
       })
   }),
+).layer
+
+const runtime = HttpRouter.middleware()(
+  Effect.succeed((effect) =>
+    Effect.gen(function* () {
+      const selected = ServerBackend.select()
+      yield* Effect.annotateCurrentSpan(
+        ServerBackend.attributes(ServerBackend.force(selected, "effect-httpapi")),
+      )
+      return yield* effect
+    }),
+  ),
 ).layer
 
 const controlRoutes = HttpApiBuilder.layer(ControlApi).pipe(Layer.provide(controlHandlers))
@@ -127,6 +148,7 @@ const instanceRoutes = Layer.mergeAll(eventRoute, ptyConnectRoute, instanceApiRo
 
 export const routes = Layer.mergeAll(controlRoutes, globalRoutes, instanceRoutes)
   .pipe(
+    Layer.provide(runtime),
     Layer.provide(Account.defaultLayer),
     Layer.provide(Agent.defaultLayer),
     Layer.provide(Auth.defaultLayer),
